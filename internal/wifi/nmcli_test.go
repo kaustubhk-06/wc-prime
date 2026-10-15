@@ -77,6 +77,7 @@ func TestNMAddArgs(t *testing.T) {
 		{"psk", Credentials{SSID: "Home", Security: PSK, Passphrase: "private-psk", Hidden: true}, []string{"wifi-sec.key-mgmt", "wpa-psk", "wifi-sec.psk-flags", "2", "802-11-wireless.hidden", "yes"}, "802-11-wireless-security.psk:private-psk\n"},
 		{"sae", Credentials{SSID: "Home", Security: SAE, Passphrase: "private-sae"}, []string{"wifi-sec.key-mgmt", "sae", "wifi-sec.psk-flags", "2"}, "802-11-wireless-security.psk:private-sae\n"},
 		{"enterprise", Credentials{SSID: "Campus", Security: Enterprise, Identity: "alice", Password: "private-eap", DomainMatch: "example.edu"}, []string{"802-1x.eap", "peap", "802-1x.phase2-auth", "mschapv2", "802-1x.password-flags", "2", "802-1x.system-ca-certs", "yes", "802-1x.domain-suffix-match", "example.edu"}, "802-1x.password:private-eap\n"},
+		{"enterprise CA", Credentials{SSID: "Campus", Security: Enterprise, Identity: "alice", Password: "private-eap", DomainMatch: "example.edu;example.org", CACert: "/etc/campus-ca.pem"}, []string{"802-1x.ca-cert", "/etc/campus-ca.pem", "802-1x.domain-suffix-match", "example.edu;example.org"}, "802-1x.password:private-eap\n"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			args, secret, err := nmAddArgs("test", tt.c)
@@ -102,7 +103,33 @@ func TestNMAddArgs(t *testing.T) {
 			if tt.c.Security == Open && strings.Contains(strings.Join(args, " "), "wifi-sec") {
 				t.Error("open network has security args")
 			}
+			if tt.c.CACert != "" && strings.Contains(strings.Join(args, " "), "802-1x.system-ca-certs") {
+				t.Error("custom CA must not enable system CA certificates")
+			}
 		})
+	}
+}
+
+func TestNMEnterpriseRequiresServerValidation(t *testing.T) {
+	for _, domain := range []string{"", " \t\n", "; ;"} {
+		for _, ca := range []string{"", "/etc/campus-ca.pem"} {
+			c := Credentials{SSID: "Campus", Security: Enterprise, Identity: "alice", Password: "secret", DomainMatch: domain, CACert: ca}
+			args, secrets, err := nmAddArgs("Campus", c)
+			if !errors.Is(err, ErrNoServerValidation) || len(args) != 0 || secrets != "" {
+				t.Fatalf("args=%v secrets=%q err=%v", args, secrets, err)
+			}
+			calls := 0
+			n := NewNM(func(context.Context, string, string, ...string) (string, error) {
+				calls++
+				return "", nil
+			})
+			if err := n.Connect(context.Background(), c); !errors.Is(err, ErrNoServerValidation) {
+				t.Fatalf("Connect error=%v", err)
+			}
+			if calls != 0 {
+				t.Fatalf("Connect made %d runner calls without server validation", calls)
+			}
+		}
 	}
 }
 

@@ -2,7 +2,10 @@ package wifi
 
 import (
 	"context"
+	"crypto/sha1"
+	"crypto/x509"
 	"encoding/hex"
+	"encoding/pem"
 	"encoding/xml"
 	"fmt"
 	"os"
@@ -151,6 +154,9 @@ func xmlEsc(s string) string {
 }
 
 func winProfileXML(name string, c Credentials) (string, error) {
+	if err := c.validateEnterprise(); err != nil {
+		return "", err
+	}
 	var sec string
 	switch c.Security {
 	case Open, "":
@@ -166,9 +172,13 @@ func winProfileXML(name string, c Credentials) (string, error) {
 		if e := strings.ToLower(orDefault(c.EAP, "peap")); e != "peap" {
 			return "", fmt.Errorf("EAP method %q: %w (Windows supports PEAP-MSCHAPv2 here)", e, ErrUnsupported)
 		}
-		validate, servers := "false", ""
-		if c.DomainMatch != "" {
-			validate, servers = "true", xmlEsc(c.DomainMatch)
+		trustedRoot := ""
+		if c.CACert != "" {
+			thumbprint, err := winCAThumbprint(c.CACert)
+			if err != nil {
+				return "", err
+			}
+			trustedRoot = `<TrustedRootCA>` + thumbprint + `</TrustedRootCA>`
 		}
 		sec = `<authEncryption><authentication>WPA2</authentication><encryption>AES</encryption><useOneX>true</useOneX></authEncryption>` +
 			`<OneX xmlns="http://www.microsoft.com/networking/OneX/v1"><authMode>user</authMode><EAPConfig>` +
@@ -177,13 +187,13 @@ func winProfileXML(name string, c Credentials) (string, error) {
 			`<VendorType xmlns="http://www.microsoft.com/provisioning/EapCommon">0</VendorType><AuthorId xmlns="http://www.microsoft.com/provisioning/EapCommon">0</AuthorId></EapMethod>` +
 			`<Config xmlns="http://www.microsoft.com/provisioning/EapHostConfig"><Eap xmlns="http://www.microsoft.com/provisioning/BaseEapConnectionPropertiesV1"><Type>25</Type>` +
 			`<EapType xmlns="http://www.microsoft.com/provisioning/MsPeapConnectionPropertiesV1">` +
-			`<ServerValidation><DisableUserPromptForServerValidation>` + validate + `</DisableUserPromptForServerValidation><ServerNames>` + servers + `</ServerNames></ServerValidation>` +
+			`<ServerValidation><DisableUserPromptForServerValidation>true</DisableUserPromptForServerValidation><ServerNames>` + xmlEsc(c.DomainMatch) + `</ServerNames>` + trustedRoot + `</ServerValidation>` +
 			`<FastReconnect>true</FastReconnect><InnerEapOptional>false</InnerEapOptional>` +
 			`<Eap xmlns="http://www.microsoft.com/provisioning/BaseEapConnectionPropertiesV1"><Type>26</Type>` +
 			`<EapType xmlns="http://www.microsoft.com/provisioning/MsChapV2ConnectionPropertiesV1"><UseWinLogonCredentials>false</UseWinLogonCredentials></EapType></Eap>` +
 			`<EnableQuarantineChecks>false</EnableQuarantineChecks><RequireCryptoBinding>false</RequireCryptoBinding>` +
-			`<PeapExtensions><PerformServerValidation xmlns="http://www.microsoft.com/provisioning/MsPeapConnectionPropertiesV2">` + validate + `</PerformServerValidation>` +
-			`<AcceptServerName xmlns="http://www.microsoft.com/provisioning/MsPeapConnectionPropertiesV2">` + validate + `</AcceptServerName></PeapExtensions>` +
+			`<PeapExtensions><PerformServerValidation xmlns="http://www.microsoft.com/provisioning/MsPeapConnectionPropertiesV2">true</PerformServerValidation>` +
+			`<AcceptServerName xmlns="http://www.microsoft.com/provisioning/MsPeapConnectionPropertiesV2">true</AcceptServerName></PeapExtensions>` +
 			`</EapType></Eap></Config></EapHostConfig></EAPConfig></OneX>`
 	default:
 		return "", fmt.Errorf("unknown security %q", c.Security)
@@ -198,6 +208,35 @@ func winProfileXML(name string, c Credentials) (string, error) {
 		`<SSIDConfig><SSID><hex>` + strings.ToUpper(hex.EncodeToString([]byte(c.SSID))) + `</hex></SSID><nonBroadcast>` + hidden + `</nonBroadcast></SSIDConfig>` +
 		`<connectionType>ESS</connectionType><connectionMode>manual</connectionMode>` +
 		`<MSM><security>` + sec + `</security></MSM></WLANProfile>`, nil
+}
+
+func winCAThumbprint(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read RADIUS CA certificate: %w", err)
+	}
+	der := data
+	for rest := data; ; {
+		block, remaining := pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		if block.Type == "CERTIFICATE" {
+			der = block.Bytes
+			break
+		}
+		rest = remaining
+	}
+	certs, err := x509.ParseCertificates(der)
+	if err != nil {
+		return "", fmt.Errorf("parse RADIUS CA certificate: %w", err)
+	}
+	if len(certs) == 0 {
+		return "", fmt.Errorf("parse RADIUS CA certificate: no certificates found")
+	}
+	// SHA-1 is the certificate identifier required by Windows, not a signature.
+	thumbprint := sha1.Sum(certs[0].Raw)
+	return fmt.Sprintf("% x", thumbprint), nil
 }
 
 // winEapUserXML is the PEAP-MSCHAPv2 user credential blob for

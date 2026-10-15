@@ -18,6 +18,7 @@ import (
 type Creds struct {
 	Username, Password string
 	LoginURL           string            // Optional fixed URL, with direct POST fallback.
+	TrustedHosts       []string          // Hosts allowed to receive credentials and to be navigated to.
 	UserField          string            // Optional username field override.
 	PassField          string            // Optional password field override.
 	Extra              map[string]string // Extra fields to set or override.
@@ -32,6 +33,10 @@ var jsRedirectRE = regexp.MustCompile(`(?i)(?:(?:(?:window|top|document)\s*\.\s*
 // Login drives a captive portal starting at startURL (or c.LoginURL when set)
 // and returns nil once verify reports that the device is online.
 func Login(ctx context.Context, startURL string, c Creds, verify func(context.Context) bool) error {
+	trusted, err := newTrustPolicy(c)
+	if err != nil {
+		return err
+	}
 	if verify == nil {
 		return fmt.Errorf("portal: connectivity verifier is required")
 	}
@@ -50,6 +55,9 @@ func Login(ctx context.Context, startURL string, c Creds, verify func(context.Co
 		if len(via) > 10 {
 			return fmt.Errorf("portal: more than 10 redirects")
 		}
+		if len(via) > 0 && via[0].Context().Value(credentialRequestKey{}) == true {
+			return trusted.check(req.URL, via[len(via)-1].URL, "login redirect goes to")
+		}
 		return nil
 	}}
 	body, current, err := request(ctx, client, http.MethodGet, startURL, "")
@@ -60,7 +68,7 @@ func Login(ctx context.Context, startURL string, c Creds, verify func(context.Co
 	for hop := 0; hop < 5; hop++ {
 		p := parsePage(body)
 		if f, ok := chooseForm(p, c); ok {
-			response, current, err = submit(ctx, client, current, f, fill(f, c))
+			response, current, err = submit(ctx, client, current, f, c, trusted)
 			break
 		}
 		if c.LoginURL != "" {
@@ -75,7 +83,7 @@ func Login(ctx context.Context, startURL string, c Creds, verify func(context.Co
 			direct := c
 			direct.UserField = user
 			direct.PassField = pass
-			response, current, err = submit(ctx, client, current, f, fill(f, direct))
+			response, current, err = submit(ctx, client, current, f, direct, trusted)
 			break
 		}
 		target := p.refresh
@@ -97,6 +105,11 @@ func Login(ctx context.Context, startURL string, c Creds, verify func(context.Co
 		if e != nil {
 			return e
 		}
+		u, _ := url.Parse(next)
+		previous, _ := url.Parse(current)
+		if e := trusted.check(u, previous, "portal hop goes to"); e != nil {
+			return e
+		}
 		body, current, err = request(ctx, client, http.MethodGet, next, "")
 		if err != nil {
 			return err
@@ -114,7 +127,7 @@ func Login(ctx context.Context, startURL string, c Creds, verify func(context.Co
 		if f.password(c) {
 			continue
 		}
-		response, current, err = submit(ctx, client, current, f, fill(f, c))
+		response, current, err = submit(ctx, client, current, f, c, trusted)
 		if err != nil {
 			return err
 		}
@@ -149,13 +162,18 @@ func resolve(base, target string) (string, error) {
 	}
 	return u.String(), nil
 }
-func submit(ctx context.Context, client *http.Client, current string, f form, values []pair) (string, string, error) {
+func submit(ctx context.Context, client *http.Client, current string, f form, c Creds, trusted trustPolicy) (string, string, error) {
 	target, err := resolve(current, f.action)
 	if err != nil {
 		return "", "", err
 	}
+	u, _ := url.Parse(target)
+	previous, _ := url.Parse(current)
+	if err := trusted.check(u, previous, "login form posts to"); err != nil {
+		return "", "", err
+	}
 	method := http.MethodPost
-	data := encode(values)
+	data := encode(fill(f, c))
 	if strings.EqualFold(f.method, "get") {
 		method = http.MethodGet
 		u, _ := url.Parse(target)
@@ -167,7 +185,7 @@ func submit(ctx context.Context, client *http.Client, current string, f form, va
 		target = u.String()
 		data = ""
 	}
-	return request(ctx, client, method, target, data)
+	return request(context.WithValue(ctx, credentialRequestKey{}, true), client, method, target, data)
 }
 func request(ctx context.Context, client *http.Client, method, target, data string) (string, string, error) {
 	target, err := resolve(target, "")

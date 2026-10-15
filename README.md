@@ -7,7 +7,7 @@
 **wc-prime keeps a device online automatically.** It's a small background service (`wcprime`) that watches the Wi-Fi link. When the link breaks, it reconnects to the best network from your saved list. When a network shows a login page (campus, hotel or office), it signs in for you.
 
 - **One static binary, standard library only.** No browser engine, runtime or daemon to install. It drives the Wi-Fi tools each OS already ships.
-- **Lightweight.** It runs one goroutine loop and does one HTTP request per check while healthy (every 15 s by default). The heap is capped at 24 MB. Idle RSS is typically under 15 MB, and CPU use rounds to zero.
+- **Lightweight.** It runs one goroutine loop and does one HTTP request per check while healthy (every 15 s by default). Idle RSS is about 10 MB on Linux, and CPU use rounds to zero. The Go runtime is given a 24 MB soft memory target. That makes garbage collection more aggressive near the target, but it is not a hard RSS limit. For a hard cap, use the OS: `MemoryMax=` in the systemd unit, for example.
 - **Linux, macOS, Windows and Android.**
 
 Created in [T3 Code](https://t3.codes).
@@ -39,11 +39,17 @@ Safety rails:
 | Captive portal login | ✅ | ✅ | ✅ | ✅ |
 | Hidden SSIDs | ✅ | ✅ | ✅ | ✅ |
 
+Enterprise networks must name the **RADIUS server domain**, which is the name on the server certificate. wcprime always turns on server certificate validation: it uses the system CA store, or a CA certificate you supply. A network saved without the domain is rejected instead of connecting unverified, because an unverified network can leak your password to a rogue access point.
+
 \* macOS and Android don't let command-line tools create 802.1X configurations. After you add the network once through the OS, wcprime still handles that network's captive portal, priorities and fallback.
 
 ### Captive portals
 
 Portal login is plain HTTP; no browser is involved. wcprime follows the redirect from the connectivity check, plus any meta-refresh or JavaScript `location` hops, and finds the login form. It keeps hidden fields such as CSRF tokens and session IDs, fills in the username and password, ticks "accept terms" boxes, and submits with the cookies the portal set. It then checks that the internet is really reachable.
+
+Credentials only go to destinations you trust. Each portal network needs either a **login URL** or a list of **trusted login hosts**. Hosts can be given as `login.example.edu`, `*.example.edu` or `https://login.example.edu`.
+
+wcprime refuses to send your username and password anywhere else, and stops before anything is transmitted. That covers forms whose action points elsewhere, meta-refresh and JavaScript hops to other hosts, redirects of the login request, and HTTPS-to-HTTP downgrades. A fake access point that copies your network's name therefore can't harvest the login.
 
 If a portal builds its form with JavaScript, set these in the network's portal options:
 
@@ -116,6 +122,7 @@ Platform caveats:
 
 - **macOS:** `networksetup` takes the passphrase as a command-line argument, so it's briefly visible to local users through `ps`.
 - **Windows:** the profile is handed to WLAN AutoConfig, which stores the key itself.
+- **macOS 14+:** the OS may hide the current SSID from command-line tools unless Location Services access is granted. wcprime still detects the connection and whether it has internet, but it can't match that network to its saved portal login.
 
 ## Layout
 

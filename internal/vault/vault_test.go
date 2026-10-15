@@ -139,7 +139,10 @@ func TestOrderAndVersion(t *testing.T) {
 
 func TestKeepSecretsAndNormalization(t *testing.T) {
 	v, _ := newVault(t)
-	n := save(t, v, Network{SSID: "psk", Security: wifi.PSK, Passphrase: "password", Portal: true, Username: "user", Password: "secret"})
+	n := save(t, v, Network{SSID: "psk", Security: wifi.PSK, Passphrase: "password", Portal: true, Username: "user", Password: "secret", PortalHosts: []string{" Login.Example.org ", ""}})
+	if len(n.PortalHosts) != 1 || n.PortalHosts[0] != "login.example.org" {
+		t.Fatalf("portal hosts not normalised: %q", n.PortalHosts)
+	}
 	n.Passphrase, n.Password = "", ""
 	n = save(t, v, n)
 	if n.Passphrase != "password" || n.Password != "secret" {
@@ -149,16 +152,16 @@ func TestKeepSecretsAndNormalization(t *testing.T) {
 	n.EAP, n.Phase2, n.AnonymousIdentity, n.CACert, n.DomainMatch = "peap", "pap", "anon", "cert", "domain"
 	n.PortalURL, n.UserField, n.PassField, n.Extra, n.InsecureTLS = "https://example.com", "u", "p", map[string]string{"x": "y"}, true
 	n = save(t, v, n)
-	if n.Passphrase != "" || n.EAP != "" || n.Phase2 != "" || n.AnonymousIdentity != "" || n.CACert != "" || n.DomainMatch != "" || n.PortalURL != "" || n.UserField != "" || n.PassField != "" || n.Extra != nil || n.InsecureTLS {
+	if n.Passphrase != "" || n.EAP != "" || n.Phase2 != "" || n.AnonymousIdentity != "" || n.CACert != "" || n.DomainMatch != "" || n.PortalURL != "" || n.UserField != "" || n.PassField != "" || n.Extra != nil || n.InsecureTLS || n.PortalHosts != nil {
 		t.Fatal("irrelevant fields not cleared")
 	}
-	e := save(t, v, Network{SSID: "enterprise", Security: wifi.Enterprise, Username: "user", Password: "secret", EAP: "ttls"})
+	e := save(t, v, Network{SSID: "enterprise", Security: wifi.Enterprise, Username: "user", Password: "secret", EAP: "ttls", DomainMatch: "radius.example.org"})
 	e.Password = ""
 	e = save(t, v, e)
 	if e.Password != "secret" || e.EAP != "ttls" {
 		t.Fatal("enterprise credentials lost")
 	}
-	click := save(t, v, Network{SSID: "click", Portal: true, Username: "guest"})
+	click := save(t, v, Network{SSID: "click", Portal: true, Username: "guest", PortalHosts: []string{"portal.example"}})
 	if click.Password != "" || click.Security != wifi.Open {
 		t.Fatal("click-through/default security")
 	}
@@ -181,6 +184,9 @@ func TestValidation(t *testing.T) {
 		{"enterprise username", Network{SSID: "x", Security: wifi.Enterprise, Password: "secret"}, "username and password"},
 		{"enterprise password", Network{SSID: "x", Security: wifi.Enterprise, Username: "user"}, "username and password"},
 		{"portal username", Network{SSID: "x", Portal: true}, "username"},
+		{"enterprise server domain", Network{SSID: "x", Security: wifi.Enterprise, Username: "user", Password: "secret"}, "RADIUS server domain"},
+		{"portal trusted host", Network{SSID: "x", Portal: true, Username: "user"}, "trusted portal host"},
+		{"portal host path", Network{SSID: "x", Portal: true, Username: "user", PortalHosts: []string{"evil.example/login"}}, "host name"},
 		{"portal scheme", Network{SSID: "x", Portal: true, Username: "user", PortalURL: "ftp://example.com"}, "http or https"},
 		{"portal relative", Network{SSID: "x", Portal: true, Username: "user", PortalURL: "/login"}, "http or https"},
 		{"portal host", Network{SSID: "x", Portal: true, Username: "user", PortalURL: "https:///login"}, "http or https"},
@@ -207,7 +213,7 @@ func TestValidation(t *testing.T) {
 
 func TestCopies(t *testing.T) {
 	v, _ := newVault(t)
-	input := Network{SSID: "copy", Portal: true, Username: "user", Extra: map[string]string{"k": "original"}}
+	input := Network{SSID: "copy", Portal: true, Username: "user", PortalHosts: []string{"h"}, Extra: map[string]string{"k": "original"}}
 	saved := save(t, v, input)
 	input.Extra["k"] = "input"
 	saved.Extra["k"] = "save"
@@ -303,7 +309,7 @@ func TestFailedPersistence(t *testing.T) {
 
 func TestConcurrentAccess(t *testing.T) {
 	v, _ := newVault(t)
-	n := save(t, v, Network{SSID: "concurrent", Portal: true, Username: "user", Extra: map[string]string{"k": "v"}})
+	n := save(t, v, Network{SSID: "concurrent", Portal: true, Username: "user", PortalHosts: []string{"h"}, Extra: map[string]string{"k": "v"}})
 	var wg sync.WaitGroup
 	for i := 0; i < 8; i++ {
 		wg.Add(1)

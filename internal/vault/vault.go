@@ -15,6 +15,7 @@ import (
 	"sync"
 	"unicode/utf8"
 
+	"github.com/owais-sadiqque-dayderh/wc-prime/internal/portal"
 	"github.com/owais-sadiqque-dayderh/wc-prime/internal/wifi"
 )
 
@@ -142,6 +143,9 @@ func clone(n Network) Network {
 		}
 		n.Extra = extra
 	}
+	if n.PortalHosts != nil {
+		n.PortalHosts = append([]string(nil), n.PortalHosts...)
+	}
 	return n
 }
 
@@ -201,6 +205,10 @@ func normalize(n Network) (Network, error) {
 		if n.Username == "" || n.Password == "" {
 			return n, errors.New("enterprise Wi-Fi requires a username and password")
 		}
+		n.DomainMatch = strings.TrimSpace(n.DomainMatch)
+		if n.DomainMatch == "" {
+			return n, errors.New("enterprise Wi-Fi requires the RADIUS server domain so the network can be verified (ask your IT desk, e.g. radius.example.edu)")
+		}
 	default:
 		return n, fmt.Errorf("unsupported Wi-Fi security %q", n.Security)
 	}
@@ -217,8 +225,24 @@ func normalize(n Network) (Network, error) {
 				return n, errors.New("portal URL must be an absolute http or https URL")
 			}
 		}
+		hosts := n.PortalHosts[:0:0]
+		for _, h := range n.PortalHosts {
+			h = strings.ToLower(strings.TrimSpace(h))
+			if h == "" {
+				continue
+			}
+			if portal.ValidateTrustedHost(h) != nil {
+				return n, fmt.Errorf("trusted portal host %q must be a host name, *.domain, or an origin like https://login.example.org", h)
+			}
+			hosts = append(hosts, h)
+		}
+		n.PortalHosts = hosts
+		if n.PortalURL == "" && len(n.PortalHosts) == 0 {
+			return n, errors.New("captive portal requires a login URL or at least one trusted portal host, so credentials are only sent to the real login page")
+		}
 	} else {
 		n.PortalURL, n.UserField, n.PassField, n.Extra, n.InsecureTLS = "", "", "", nil, false
+		n.PortalHosts = nil
 	}
 	return n, nil
 }

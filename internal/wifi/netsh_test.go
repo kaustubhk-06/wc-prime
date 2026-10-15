@@ -1,12 +1,23 @@
 package wifi
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha1"
+	"crypto/x509"
 	"encoding/hex"
+	"encoding/pem"
 	"encoding/xml"
 	"errors"
+	"fmt"
+	"math/big"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseNetshInterfaces(t *testing.T) {
@@ -100,9 +111,88 @@ func TestWinProfileXML(t *testing.T) {
 			}
 		})
 	}
-	_, err := winProfileXML("Campus", Credentials{SSID: "Campus", Security: Enterprise, EAP: "ttls"})
+	_, err := winProfileXML("Campus", Credentials{SSID: "Campus", Security: Enterprise, EAP: "ttls", DomainMatch: "example.edu"})
 	if !errors.Is(err, ErrUnsupported) {
 		t.Fatalf("TTLS error=%v", err)
+	}
+}
+
+func TestWinProfileEnterpriseServerValidation(t *testing.T) {
+	c := Credentials{SSID: "Campus", Security: Enterprise, Identity: "alice", Password: "secret"}
+	for _, domain := range []string{"", " \t\n", "; ;"} {
+		c.DomainMatch = domain
+		data, err := winProfileXML("Campus", c)
+		if !errors.Is(err, ErrNoServerValidation) || data != "" {
+			t.Fatalf("domain=%q: profile=%q err=%v", domain, data, err)
+		}
+	}
+	c.DomainMatch = "auth.example.edu;radius.example.edu"
+	data, err := winProfileXML("Campus", c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root xmlNode
+	if err := xml.Unmarshal([]byte(data), &root); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"PerformServerValidation", "AcceptServerName", "DisableUserPromptForServerValidation"} {
+		if got := root.find(name); got != "true" {
+			t.Errorf("%s=%q, want true", name, got)
+		}
+	}
+	if got := root.find("ServerNames"); got != c.DomainMatch {
+		t.Errorf("ServerNames=%q, want %q", got, c.DomainMatch)
+	}
+}
+
+func TestWinProfileEnterpriseCA(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := &x509.Certificate{SerialNumber: big.NewInt(1), NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour), IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	thumbprint := sha1.Sum(cert.Raw)
+	want := fmt.Sprintf("% x", thumbprint)
+	for _, format := range []string{"PEM", "DER"} {
+		t.Run(format, func(t *testing.T) {
+			data := der
+			if format == "PEM" {
+				data = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+				// A bundle uses its first certificate, not the following entry.
+				data = append(data, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte("invalid second certificate")})...)
+			}
+			path := filepath.Join(t.TempDir(), "ca.crt")
+			if err := os.WriteFile(path, data, 0600); err != nil {
+				t.Fatal(err)
+			}
+			profile, err := winProfileXML("Campus", Credentials{Security: Enterprise, DomainMatch: "example.edu", CACert: path})
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Assert both the fingerprint and the schema's child order.
+			validation := `<ServerValidation><DisableUserPromptForServerValidation>true</DisableUserPromptForServerValidation><ServerNames>example.edu</ServerNames><TrustedRootCA>` + want + `</TrustedRootCA></ServerValidation>`
+			if !strings.Contains(profile, validation) {
+				t.Errorf("missing server validation %s in %s", validation, profile)
+			}
+		})
+	}
+	path := filepath.Join(t.TempDir(), "invalid.crt")
+	if err := os.WriteFile(path, []byte("not a certificate"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{path, filepath.Join(t.TempDir(), "missing.crt")} {
+		profile, err := winProfileXML("Campus", Credentials{Security: Enterprise, DomainMatch: "example.edu", CACert: path})
+		if err == nil || profile != "" {
+			t.Fatalf("CA=%q: profile=%q err=%v", path, profile, err)
+		}
 	}
 }
 

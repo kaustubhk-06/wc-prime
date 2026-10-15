@@ -77,12 +77,11 @@ func nmProfile(ssid string) string { return "wcprime-" + ssid }
 
 func (n *NM) Connect(ctx context.Context, c Credentials) error {
 	name := nmProfile(c.SSID)
-	_, _ = n.run(ctx, "", "nmcli", "connection", "delete", "id", name)
-
 	args, secrets, err := nmAddArgs(name, c)
 	if err != nil {
 		return err
 	}
+	_, _ = n.run(ctx, "", "nmcli", "connection", "delete", "id", name)
 	if _, err := n.run(ctx, "", "nmcli", args...); err != nil {
 		return err
 	}
@@ -97,6 +96,9 @@ func (n *NM) Connect(ctx context.Context, c Credentials) error {
 // nmAddArgs builds the "nmcli connection add" arguments and the
 // passwd-file content that supplies secrets at activation time.
 func nmAddArgs(name string, c Credentials) (args []string, secrets string, err error) {
+	if err := c.validateEnterprise(); err != nil {
+		return nil, "", err
+	}
 	args = []string{"connection", "add", "type", "wifi", "con-name", name, "ssid", c.SSID,
 		"connection.autoconnect", "no"}
 	if c.Hidden {
@@ -121,12 +123,10 @@ func nmAddArgs(name string, c Credentials) (args []string, secrets string, err e
 		}
 		if c.CACert != "" {
 			args = append(args, "802-1x.ca-cert", c.CACert)
-		} else if c.DomainMatch != "" {
+		} else {
 			args = append(args, "802-1x.system-ca-certs", "yes")
 		}
-		if c.DomainMatch != "" {
-			args = append(args, "802-1x.domain-suffix-match", c.DomainMatch)
-		}
+		args = append(args, "802-1x.domain-suffix-match", c.DomainMatch)
 		secrets = "802-1x.password:" + c.Password + "\n"
 	default:
 		return nil, "", fmt.Errorf("unknown security %q", c.Security)

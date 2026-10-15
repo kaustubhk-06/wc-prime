@@ -54,7 +54,22 @@ type Credentials struct {
 	Password          string
 	AnonymousIdentity string
 	CACert            string // path to CA certificate, optional
-	DomainMatch       string // server domain suffix to verify, optional
+	DomainMatch       string // required Enterprise server certificate name/domain suffix; semicolon-separated names allowed
+}
+
+// ErrNoServerValidation means Enterprise credentials cannot verify the RADIUS server.
+var ErrNoServerValidation = errors.New("enterprise network needs the RADIUS server domain (server certificate name) so the server can be verified")
+
+func (c Credentials) validateEnterprise() error {
+	if c.Security != Enterprise {
+		return nil
+	}
+	for _, name := range strings.Split(c.DomainMatch, ";") {
+		if strings.TrimSpace(name) != "" {
+			return nil
+		}
+	}
+	return fmt.Errorf("network %q: %w", c.SSID, ErrNoServerValidation)
 }
 
 // Backend is implemented once per platform.

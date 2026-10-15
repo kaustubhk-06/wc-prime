@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -43,7 +44,7 @@ func TestLoginFullFlow(t *testing.T) {
 	})
 	s := httptest.NewServer(mux)
 	defer s.Close()
-	if err := Login(context.Background(), s.URL+"/probe", Creds{Username: "alice", Password: "secret"}, func(context.Context) bool { return online }); err != nil {
+	if err := Login(context.Background(), s.URL+"/probe", Creds{TrustedHosts: []string{testHost(s.URL)}, Username: "alice", Password: "secret"}, func(context.Context) bool { return online }); err != nil {
 		t.Fatal(err)
 	}
 	if posts != 1 {
@@ -78,7 +79,7 @@ func TestRedirectHops(t *testing.T) {
 				}
 			}))
 			defer s.Close()
-			if err := Login(context.Background(), s.URL+"/start", Creds{}, func(context.Context) bool { return online }); err != nil {
+			if err := Login(context.Background(), s.URL+"/start", Creds{TrustedHosts: []string{testHost(s.URL)}}, func(context.Context) bool { return online }); err != nil {
 				t.Fatal(err)
 			}
 		})
@@ -104,7 +105,7 @@ func TestLoginContinuation(t *testing.T) {
 		}
 	}))
 	defer s.Close()
-	err := Login(context.Background(), s.URL, Creds{Username: "u", Password: "p"}, func(context.Context) bool { checks++; return stage == 2 })
+	err := Login(context.Background(), s.URL, Creds{TrustedHosts: []string{testHost(s.URL)}, Username: "u", Password: "p"}, func(context.Context) bool { checks++; return stage == 2 })
 	if err != nil || checks != 2 {
 		t.Fatalf("err=%v checks=%d", err, checks)
 	}
@@ -145,7 +146,7 @@ func TestLoginGETOverrides(t *testing.T) {
 		fmt.Fprint(w, `<form action="/done?existing=yes" method=GET><input name=uid><input type=number name=code><input type=hidden name=token value=old></form>`)
 	}))
 	defer s.Close()
-	err := Login(context.Background(), s.URL, Creds{Username: "u", Password: "p", UserField: "uid", PassField: "code", Extra: map[string]string{"token": "new", "extra": "ok"}}, func(context.Context) bool { return online })
+	err := Login(context.Background(), s.URL, Creds{TrustedHosts: []string{testHost(s.URL)}, Username: "u", Password: "p", UserField: "uid", PassField: "code", Extra: map[string]string{"token": "new", "extra": "ok"}}, func(context.Context) bool { return online })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,7 +162,7 @@ func TestLoginFailures(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, tt.body) }))
 			defer s.Close()
-			err := Login(context.Background(), s.URL, Creds{}, func(context.Context) bool { return false })
+			err := Login(context.Background(), s.URL, Creds{TrustedHosts: []string{testHost(s.URL)}}, func(context.Context) bool { return false })
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("got %v, want %q", err, tt.want)
 			}
@@ -172,20 +173,20 @@ func TestLoginFailures(t *testing.T) {
 func TestTLSAndLimits(t *testing.T) {
 	s := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, `<form><button>Continue</button></form>`) }))
 	defer s.Close()
-	if err := Login(context.Background(), s.URL, Creds{InsecureTLS: true}, func(context.Context) bool { return true }); err != nil {
+	if err := Login(context.Background(), s.URL, Creds{TrustedHosts: []string{testHost(s.URL)}, InsecureTLS: true}, func(context.Context) bool { return true }); err != nil {
 		t.Fatal(err)
 	}
 	large := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, strings.Repeat("x", bodyLimit+1)) }))
 	defer large.Close()
-	if err := Login(context.Background(), large.URL, Creds{}, func(context.Context) bool { return false }); err == nil || !strings.Contains(err.Error(), "exceeds") {
+	if err := Login(context.Background(), large.URL, Creds{TrustedHosts: []string{testHost(large.URL)}}, func(context.Context) bool { return false }); err == nil || !strings.Contains(err.Error(), "exceeds") {
 		t.Fatalf("size limit: %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := Login(ctx, large.URL, Creds{}, func(context.Context) bool { return false }); err == nil {
+	if err := Login(ctx, large.URL, Creds{TrustedHosts: []string{testHost(large.URL)}}, func(context.Context) bool { return false }); err == nil {
 		t.Fatal("expected cancellation")
 	}
-	if err := Login(context.Background(), large.URL, Creds{}, nil); err == nil {
+	if err := Login(context.Background(), large.URL, Creds{TrustedHosts: []string{testHost(large.URL)}}, nil); err == nil {
 		t.Fatal("expected nil verifier error")
 	}
 }
@@ -212,8 +213,13 @@ func TestRedirectLimit(t *testing.T) {
 		http.Redirect(w, r, "/", http.StatusFound)
 	}))
 	defer s.Close()
-	err := Login(context.Background(), s.URL, Creds{}, func(context.Context) bool { return false })
+	err := Login(context.Background(), s.URL, Creds{TrustedHosts: []string{testHost(s.URL)}}, func(context.Context) bool { return false })
 	if err == nil || !strings.Contains(err.Error(), "more than 10 redirects") {
 		t.Fatalf("redirect limit: %v", err)
 	}
+}
+
+func testHost(raw string) string {
+	u, _ := url.Parse(raw)
+	return u.Host
 }

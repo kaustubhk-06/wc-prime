@@ -26,7 +26,8 @@ type Network struct {
 
 	// Captive portal.
 	Portal      bool              `json:"portal,omitempty"`      // submit Username/Password to a login page
-	PortalURL   string            `json:"portalURL,omitempty"`   // optional fixed login URL
+	PortalURL   string            `json:"portalURL,omitempty"`   // optional fixed login URL (its host is trusted)
+	PortalHosts []string          `json:"portalHosts,omitempty"` // hosts allowed to receive the login
 	UserField   string            `json:"userField,omitempty"`   // optional form field name override
 	PassField   string            `json:"passField,omitempty"`   // optional form field name override
 	Extra       map[string]string `json:"extra,omitempty"`       // extra form fields to send

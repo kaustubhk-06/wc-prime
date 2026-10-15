@@ -36,6 +36,7 @@ func PortalLogin(ctx context.Context, portalURL string, n vault.Network, verify 
 	return portal.Login(ctx, portalURL, portal.Creds{
 		Username: n.Username, Password: n.Password, LoginURL: n.PortalURL,
 		UserField: n.UserField, PassField: n.PassField, Extra: n.Extra, InsecureTLS: n.InsecureTLS,
+		TrustedHosts: n.PortalHosts,
 	}, verify)
 }
 
@@ -215,7 +216,7 @@ func (k *Keeper) Tick(ctx context.Context) Health {
 	case probe.Captive:
 		k.poorStrikes = 0
 		k.setHealth(Captive, st, res.RTT)
-		if isSaved && saved.Portal && k.portalAllowed(st.SSID) {
+		if isSaved && saved.Enabled && saved.Portal && k.portalAllowed(st.SSID) {
 			if k.portal(ctx, saved, res.PortalURL) {
 				k.setHealth(Online, st, 0)
 				return Online
@@ -228,7 +229,7 @@ func (k *Keeper) Tick(ctx context.Context) Health {
 		k.failStrikes++
 		k.setHealth(NoInternet, st, 0)
 		// Some portals block DNS until login; a configured login URL still works.
-		if isSaved && saved.Portal && saved.PortalURL != "" && k.portalAllowed(st.SSID) {
+		if isSaved && saved.Enabled && saved.Portal && saved.PortalURL != "" && k.portalAllowed(st.SSID) {
 			if k.portal(ctx, saved, saved.PortalURL) {
 				k.setHealth(Online, st, 0)
 				return Online
@@ -272,25 +273,37 @@ func (k *Keeper) portal(ctx context.Context, n vault.Network, url string) bool {
 }
 
 // switchFromPoor moves to a clearly better saved network, if one is visible.
+// The current link still works, so it is only gambled when it can be
+// restored: if every better network fails, the keeper rejoins it.
 func (k *Keeper) switchFromPoor(ctx context.Context, st wifi.Status) Health {
+	k.poorStrikes = 0 // re-evaluate after a few more strikes, not every tick
+	prev, ok := k.store.FindSSID(st.SSID)
+	if !ok || !prev.Enabled {
+		return Poor // no saved credentials to come back with
+	}
 	aps, err := k.wifi.Scan(ctx)
 	if err != nil {
 		k.log.Warn("scan: %v", err)
 		return Poor
 	}
-	better := false
+	var better []candidate
 	for _, c := range k.candidates(aps, st.SSID) {
-		if c.signal >= k.cfg.MinSignal+10 && (st.Signal < 0 || c.signal >= st.Signal+15) {
-			better = true
-			break
+		if !c.cooled && c.signal >= k.cfg.MinSignal+10 && (st.Signal < 0 || c.signal >= st.Signal+15) {
+			better = append(better, c)
 		}
 	}
-	if !better {
-		k.poorStrikes = 0 // re-evaluate after a few more strikes; a weak link beats none
-		return Poor
+	if len(better) == 0 {
+		return Poor // a weak link beats none
 	}
-	k.poorStrikes = 0
-	return k.recoverWith(ctx, aps, st.SSID, "poor link")
+	if h, ok := k.tryCandidates(ctx, better, "poor link"); ok {
+		k.cooldown[st.SSID] = k.now().Add(k.cfg.Cooldown)
+		return h
+	}
+	k.action("No better network worked, returning to %q", prev.SSID)
+	if h, ok := k.tryConnect(ctx, prev); ok {
+		return h
+	}
+	return k.settle(ctx)
 }
 
 func (k *Keeper) recover(ctx context.Context, exclude, reason string) Health {
@@ -306,8 +319,9 @@ func (k *Keeper) recover(ctx context.Context, exclude, reason string) Health {
 	return k.recoverWith(ctx, aps, exclude, reason)
 }
 
-// recoverWith tries saved, visible networks in priority order. The network
-// being left is put on cooldown so the keeper doesn't bounce straight back.
+// recoverWith leaves a broken link (or none) for saved, visible networks in
+// priority order. The network being left is put on cooldown so the keeper
+// doesn't bounce straight back.
 func (k *Keeper) recoverWith(ctx context.Context, aps []wifi.AP, exclude, reason string) Health {
 	cands := k.candidates(aps, exclude)
 	if len(cands) == 0 {
@@ -322,6 +336,17 @@ func (k *Keeper) recoverWith(ctx context.Context, aps []wifi.AP, exclude, reason
 	if exclude != "" {
 		k.cooldown[exclude] = k.now().Add(k.cfg.Cooldown)
 	}
+	if h, ok := k.tryCandidates(ctx, cands, reason); ok {
+		return h
+	}
+	k.nextScan = k.now().Add(30 * time.Second)
+	k.log.Warn("no saved network could be brought online")
+	return k.settle(ctx)
+}
+
+// tryCandidates joins each candidate in order until one is online. Failures
+// go on cooldown.
+func (k *Keeper) tryCandidates(ctx context.Context, cands []candidate, reason string) (Health, bool) {
 	k.update(func(s *Snapshot) { s.Health = Recovering })
 	for _, c := range cands {
 		if ctx.Err() != nil {
@@ -329,12 +354,21 @@ func (k *Keeper) recoverWith(ctx context.Context, aps []wifi.AP, exclude, reason
 		}
 		k.action("%s: trying %q", capitalize(reason), c.n.SSID)
 		if h, ok := k.tryConnect(ctx, c.n); ok {
-			return h
+			return h, true
 		}
 		k.cooldown[c.n.SSID] = k.now().Add(k.cfg.Cooldown)
 	}
-	k.nextScan = k.now().Add(30 * time.Second)
-	k.log.Warn("no saved network could be brought online")
+	return "", false
+}
+
+// settle records the link as it actually is after failed repairs, which may
+// still be associated to a network without internet.
+func (k *Keeper) settle(ctx context.Context) Health {
+	st, err := k.wifi.Status(ctx)
+	if err == nil && st.Connected {
+		k.setHealth(NoInternet, st, 0)
+		return NoInternet
+	}
 	k.setHealth(Disconnected, wifi.Status{Signal: -1}, 0)
 	return Disconnected
 }

@@ -269,3 +269,80 @@ func TestSlowSingleProbeIsNotPoor(t *testing.T) {
 		t.Fatalf("health = %s", h)
 	}
 }
+
+// Review regression: poor-link recovery must only try qualifying networks,
+// keeping user priority among them.
+func TestPoorLinkSkipsHigherPriorityButWeakerNetwork(t *testing.T) {
+	r := newRig(fakeStore{net("weakalt"), net("strong"), net("cur")})
+	r.connectedTo("cur", 15)
+	r.p.results["cur"] = online
+	r.p.results["weakalt"] = online
+	r.p.results["strong"] = online
+	r.w.aps = []wifi.AP{{SSID: "cur", Signal: 15}, {SSID: "weakalt", Signal: 5}, {SSID: "strong", Signal: 90}}
+	for i := 0; i < 3; i++ {
+		r.k.Tick(context.Background())
+	}
+	if len(r.w.connects) != 1 || r.w.connects[0] != "strong" {
+		t.Fatalf("connects = %v, want [strong]", r.w.connects)
+	}
+}
+
+// Review regression: if the better network has no internet, rejoin the
+// original working one.
+func TestPoorLinkRestoresWorkingNetwork(t *testing.T) {
+	r := newRig(fakeStore{net("cur"), net("backup")})
+	r.connectedTo("cur", 10)
+	r.p.results["cur"] = online // backup has no result → no internet
+	r.w.aps = []wifi.AP{{SSID: "cur", Signal: 10}, {SSID: "backup", Signal: 90}}
+	var h Health
+	for i := 0; i < 3; i++ {
+		h = r.k.Tick(context.Background())
+	}
+	if len(r.w.connects) != 2 || r.w.connects[0] != "backup" || r.w.connects[1] != "cur" {
+		t.Fatalf("connects = %v, want [backup cur]", r.w.connects)
+	}
+	if r.w.st.SSID != "cur" || h != Online {
+		t.Fatalf("ended on %q with health %s, want cur/online", r.w.st.SSID, h)
+	}
+}
+
+func TestPoorUnsavedLinkIsNotGambled(t *testing.T) {
+	r := newRig(fakeStore{net("strong")})
+	r.connectedTo("friend", 10)
+	r.p.results["friend"] = online
+	r.w.aps = []wifi.AP{{SSID: "friend", Signal: 10}, {SSID: "strong", Signal: 90}}
+	for i := 0; i < 3; i++ {
+		r.k.Tick(context.Background())
+	}
+	if len(r.w.connects) != 0 {
+		t.Fatalf("an unsaved link can't be restored, so it must not be left: %v", r.w.connects)
+	}
+}
+
+func TestFailedRecoveryReportsActualAssociation(t *testing.T) {
+	r := newRig(fakeStore{net("home"), net("backup")})
+	r.connectedTo("home", 80)
+	r.w.aps = []wifi.AP{{SSID: "home", Signal: 80}, {SSID: "backup", Signal: 60}}
+	r.k.Tick(context.Background())
+	if h := r.k.Tick(context.Background()); h != NoInternet {
+		t.Fatalf("health = %s, want no-internet (still associated)", h)
+	}
+	if s := r.k.Status(); s.SSID != "backup" {
+		t.Fatalf("snapshot SSID = %q, want the network actually joined", s.SSID)
+	}
+}
+
+// Review regression: a disabled entry's portal credentials are never used.
+func TestDisabledNetworkPortalNotUsed(t *testing.T) {
+	n := net("campus")
+	n.Enabled, n.Portal, n.Username, n.PortalURL = false, true, "alice", "http://login.campus/"
+	r := newRig(fakeStore{n})
+	r.connectedTo("campus", 70)
+	r.p.results["campus"] = probe.Result{State: probe.Captive, PortalURL: "http://login.campus/"}
+	r.k.Tick(context.Background())
+	delete(r.p.results, "campus") // no internet path with a fixed login URL
+	r.k.Tick(context.Background())
+	if len(r.logins) != 0 {
+		t.Fatalf("disabled network's credentials were submitted: %v", r.logins)
+	}
+}

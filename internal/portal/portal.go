@@ -202,6 +202,14 @@ func request(ctx context.Context, client *http.Client, method, target, data stri
 	}
 	resp, err := client.Do(req)
 	if err != nil {
+		// net/http includes the complete request URL in url.Error. A portal
+		// using a GET form puts credentials in that URL, and this error is
+		// later written to the service log and returned through the events API.
+		// Keep the underlying failure (including redirect-policy errors),
+		// without propagating the credential-bearing URL.
+		if requestErr, ok := err.(*url.Error); ok {
+			err = requestErr.Err
+		}
 		return "", "", fmt.Errorf("portal: %s: %w", method, err)
 	}
 	defer resp.Body.Close()

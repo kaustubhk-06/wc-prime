@@ -223,3 +223,30 @@ func testHost(raw string) string {
 	u, _ := url.Parse(raw)
 	return u.Host
 }
+
+func TestGETFailureDoesNotExposeCredentials(t *testing.T) {
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/auth" {
+			conn, _, err := w.(http.Hijacker).Hijack()
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			conn.Close()
+			return
+		}
+		fmt.Fprint(w, `<form action="/auth" method="get"><input name="username"><input type="password" name="password"></form>`)
+	}))
+	defer s.Close()
+	err := Login(context.Background(), s.URL, Creds{
+		LoginURL: s.URL, Username: "private-test-user", Password: "private-test-password",
+	}, func(context.Context) bool { return false })
+	if err == nil {
+		t.Fatal("expected a request failure")
+	}
+	for _, secret := range []string{"private-test-user", "private-test-password"} {
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("credential exposed in propagated error: %v", err)
+		}
+	}
+}

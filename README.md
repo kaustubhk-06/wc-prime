@@ -61,6 +61,8 @@ wcprime then posts to the login URL directly.
 
 ## Install
 
+For a step-by-step walkthrough, local UI trial, and platform limitations, see [SETUP.md](SETUP.md).
+
 Download a binary from the CI artifacts, or build it yourself (Go 1.22+):
 
 ```sh
